@@ -36,3 +36,22 @@ pub fn read_text_with_retry(max_wait: Duration) -> Option<String> {
 
     None
 }
+
+/// Writes plain text to the clipboard.
+/// Returns Ok(()) on success, Err on failure.
+pub fn write_text(text: &str) -> Result<(), String> {
+    let mut ctx = ClipboardContext::new().map_err(|e| e.to_string())?;
+    ctx.set_contents(text.to_owned()).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Reads current clipboard as text. Returns None if empty or non-text.
+pub fn read_text() -> Option<String> {
+    let mut ctx = ClipboardContext::new().ok()?;
+    let contents = ctx.get_contents().ok()?;
+    let trimmed = contents.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}

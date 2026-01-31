@@ -2,16 +2,26 @@
 
 use crate::keys::{Key, SlotId};
 use std::collections::HashMap;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::atomic::Ordering;
+use std::sync::{atomic::AtomicU8, mpsc::Receiver, mpsc::Sender, Arc};
 use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
+/// Mode for event tap: 0=Idle, 1=CopyArmed, 2=CopySelecting, 3=PasteSelecting.
+pub const MODE_IDLE: u8 = 0;
+pub const MODE_COPY_ARMED: u8 = 1;
+pub const MODE_COPY_SELECTING: u8 = 2;
+pub const MODE_PASTE_SELECTING: u8 = 3;
+
 /// Internal events from event tap or timer.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Event {
     KeyDown(Key, u64),
     KeyUp(Key, u64),
     FlagsChanged(u64),
+    /// Sent by event tap when Cmd+V was swallowed in Idle (paste trigger).
+    CmdVTrigger,
     Timeout(u64),
     Quit,
 }
@@ -61,11 +71,13 @@ impl Default for SlotStorage {
 }
 
 /// Runs the state machine loop. Returns when Quit is received.
-pub fn run(rx: Receiver<Event>, tx: Sender<Event>) {
+/// Updates `mode` (0=Idle, 1=CopyArmed, 2=CopySelecting, 3=PasteSelecting) on every transition.
+pub fn run(rx: Receiver<Event>, tx: Sender<Event>, mode: Arc<AtomicU8>) {
     let mut state = State::Idle;
     let mut cmd_down = false;
     let mut next_token: u64 = 0;
     let mut slots = SlotStorage::new();
+    mode.store(MODE_IDLE, Ordering::Release);
 
     loop {
         let event = match rx.recv() {
@@ -98,7 +110,18 @@ pub fn run(rx: Receiver<Event>, tx: Sender<Event>) {
                 handle_paste_selecting(event, deadline, token, &slots)
             }
         };
+        set_mode_for_state(&state, &mode);
     }
+}
+
+fn set_mode_for_state(state: &State, mode: &AtomicU8) {
+    let m = match state {
+        State::Idle => MODE_IDLE,
+        State::CopyArmed { .. } => MODE_COPY_ARMED,
+        State::CopySelecting { .. } => MODE_COPY_SELECTING,
+        State::PasteSelecting { .. } => MODE_PASTE_SELECTING,
+    };
+    mode.store(m, Ordering::Release);
 }
 
 fn handle_idle(
@@ -116,6 +139,14 @@ fn handle_idle(
             spawn_timeout(deadline, token, tx.clone());
             debug!("CopyArmed deadline={:?} token={}", deadline, token);
             State::CopyArmed { deadline, token }
+        }
+        Event::CmdVTrigger => {
+            *next_token += 1;
+            let token = *next_token;
+            let deadline = Instant::now() + SLOT_SELECT_WINDOW;
+            spawn_timeout(deadline, token, tx.clone());
+            debug!("PasteSelecting deadline={:?} token={}", deadline, token);
+            State::PasteSelecting { deadline, token }
         }
         Event::KeyDown(Key::V, flags) if (flags & CMD_MASK) != 0 => {
             *next_token += 1;
@@ -258,8 +289,10 @@ fn handle_paste_selecting(
             if Instant::now() < deadline {
                 if slots.is_empty(slot) {
                     info!("Slot {} is empty", slot.label());
-                } else {
+                } else if let Some(content) = slots.get(slot).map(|s| s.to_string()) {
                     info!("Pasted ← Slot {}", slot.label());
+                    #[cfg(target_os = "macos")]
+                    crate::macos::paste::paste_from_slot(&content);
                 }
             } else {
                 info!("Paste select cancelled (timeout)");

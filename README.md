@@ -86,3 +86,9 @@ RUST_LOG=info cargo run -p clip-agent
 - [ ] **Copy + slot with text:** Copy text in any app (Cmd+C), release Cmd, hit J quickly → logs `Saved → Slot J: "..."` with actual copied preview
 - [ ] **Copy non-text:** Copy image or other non-text content, then Cmd+C → J → logs `Nothing to save (clipboard has no text)`
 - [ ] **Paste flow unchanged:** Cmd+V then J → logs `Pasted ← Slot J` if slot has text, or `Slot J is empty` otherwise
+
+## Milestone 5 Verification (paste from slot + Cmd+V suppression)
+
+- [ ] **Cmd+V does not paste immediately:** With focus in any app (e.g. TextEdit), press Cmd+V once. The target app must **not** paste; nothing is pasted until a slot is chosen.
+- [ ] **Cmd+V then J pastes Slot J:** Copy some text, save to Slot J (Cmd+C → release Cmd → J). Focus elsewhere, press Cmd+V then J. The **Slot J** text is pasted into the app (clipboard is restored after a short delay).
+- [ ] **Empty slot:** Cmd+V then J when Slot J has no text → logs `Slot J is empty`, no paste.

@@ -41,7 +41,9 @@ fn main() {
 #[cfg(target_os = "macos")]
 fn run_macos() -> Result<(), String> {
     use crate::state_machine::{run, Event};
+    use std::sync::atomic::AtomicU8;
     use std::sync::mpsc;
+    use std::sync::Arc;
     use std::thread;
 
     if !macos::event_tap::has_accessibility_permission() {
@@ -52,6 +54,7 @@ fn run_macos() -> Result<(), String> {
     }
 
     let (tx, rx) = mpsc::channel();
+    let mode = Arc::new(AtomicU8::new(0));
 
     ctrlc::set_handler({
         let tx = tx.clone();
@@ -64,9 +67,10 @@ fn run_macos() -> Result<(), String> {
     .map_err(|e| format!("Failed to set Ctrl+C handler: {}", e))?;
 
     let state_tx = tx.clone();
-    let state_handle = thread::spawn(move || run(rx, state_tx));
+    let mode_state = mode.clone();
+    let state_handle = thread::spawn(move || run(rx, state_tx, mode_state));
 
-    macos::event_tap::run_event_tap_with_sender(tx)?;
+    macos::event_tap::run_event_tap_with_sender(tx, mode)?;
 
     let _ = state_handle.join();
     Ok(())

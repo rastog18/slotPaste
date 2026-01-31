@@ -2,3 +2,4 @@
 
 pub mod clipboard;
 pub mod event_tap;
+pub mod paste;
