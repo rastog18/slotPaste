@@ -92,3 +92,11 @@ RUST_LOG=info cargo run -p clip-agent
 - [ ] **Cmd+V does not paste immediately:** With focus in any app (e.g. TextEdit), press Cmd+V once. The target app must **not** paste; nothing is pasted until a slot is chosen.
 - [ ] **Cmd+V then J pastes Slot J:** Copy some text, save to Slot J (Cmd+C → release Cmd → J). Focus elsewhere, press Cmd+V then J. The **Slot J** text is pasted into the app (clipboard is restored after a short delay).
 - [ ] **Empty slot:** Cmd+V then J when Slot J has no text → logs `Slot J is empty`, no paste.
+
+## Milestone 6 Verification (SQLite persistence)
+
+- [ ] **Save text into Slot J:** Copy text, Cmd+C → release Cmd → J. Log shows `Saved → Slot J: "..."`.
+- [ ] **Stop agent:** Press Ctrl+C.
+- [ ] **Restart agent:** `RUST_LOG=info cargo run -p clip-agent`.
+- [ ] **Paste after restart:** Cmd+V then J. The previously saved Slot J text is pasted (proves persistence).
+- [ ] **DB file exists:** On macOS, `~/Library/Application Support/Slotpaste/slotpaste.db` exists; on other platforms, `~/.slotpaste/slotpaste.db`.

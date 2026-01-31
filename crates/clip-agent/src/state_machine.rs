@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{atomic::AtomicU8, mpsc::Receiver, mpsc::Sender, Arc};
 use std::time::{Duration, Instant};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Mode for event tap: 0=Idle, 1=CopyArmed, 2=CopySelecting, 3=PasteSelecting.
 pub const MODE_IDLE: u8 = 0;
@@ -38,21 +38,35 @@ enum State {
     PasteSelecting { deadline: Instant, token: u64 },
 }
 
-/// In-memory slot storage (for "empty" check during paste).
-/// Milestone 4 will add persistence.
+/// In-memory slot storage; optionally backed by SQLite (upsert on save, load on start).
 pub struct SlotStorage {
     slots: HashMap<SlotId, String>,
+    persistence: Option<rusqlite::Connection>,
 }
 
 impl SlotStorage {
     pub fn new() -> Self {
         Self {
             slots: HashMap::new(),
+            persistence: None,
+        }
+    }
+
+    /// Pre-populate from DB and use connection for future upserts.
+    pub fn with_persistence(conn: rusqlite::Connection, loaded: HashMap<SlotId, String>) -> Self {
+        Self {
+            slots: loaded,
+            persistence: Some(conn),
         }
     }
 
     pub fn save(&mut self, slot: SlotId, content: String) {
-        self.slots.insert(slot, content);
+        self.slots.insert(slot, content.clone());
+        if let Some(ref conn) = self.persistence {
+            if let Err(e) = crate::persistence::sqlite::upsert_slot(conn, slot.label(), &content) {
+                warn!("persistence upsert failed: {}", e);
+            }
+        }
     }
 
     pub fn get(&self, slot: SlotId) -> Option<&str> {
@@ -72,11 +86,35 @@ impl Default for SlotStorage {
 
 /// Runs the state machine loop. Returns when Quit is received.
 /// Updates `mode` (0=Idle, 1=CopyArmed, 2=CopySelecting, 3=PasteSelecting) on every transition.
-pub fn run(rx: Receiver<Event>, tx: Sender<Event>, mode: Arc<AtomicU8>) {
+/// If `persistence` is Some(conn), loads slots from DB and upserts on save.
+pub fn run(
+    rx: Receiver<Event>,
+    tx: Sender<Event>,
+    mode: Arc<AtomicU8>,
+    persistence: Option<rusqlite::Connection>,
+) {
+    let mut slots = match persistence {
+        Some(conn) => {
+            match crate::persistence::sqlite::load_all(&conn) {
+                Ok(rows) => {
+                    let loaded: HashMap<SlotId, String> = rows
+                        .into_iter()
+                        .filter_map(|(k, v)| SlotId::from_label(&k).map(|s| (s, v)))
+                    .collect();
+                    info!("loaded {} slots from DB", loaded.len());
+                    SlotStorage::with_persistence(conn, loaded)
+                }
+                Err(e) => {
+                    warn!("persistence load failed: {}, using in-memory only", e);
+                    SlotStorage::new()
+                }
+            }
+        }
+        None => SlotStorage::new(),
+    };
     let mut state = State::Idle;
     let mut cmd_down = false;
     let mut next_token: u64 = 0;
-    let mut slots = SlotStorage::new();
     mode.store(MODE_IDLE, Ordering::Release);
 
     loop {

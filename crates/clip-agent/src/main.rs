@@ -5,6 +5,7 @@ use tracing::info;
 use tracing::warn;
 
 mod keys;
+mod persistence;
 mod state_machine;
 
 fn main() {
@@ -45,6 +46,7 @@ fn run_macos() -> Result<(), String> {
     use std::sync::mpsc;
     use std::sync::Arc;
     use std::thread;
+    use tracing::warn;
 
     if !macos::event_tap::has_accessibility_permission() {
         return Err(
@@ -52,6 +54,21 @@ fn run_macos() -> Result<(), String> {
                 .to_string(),
         );
     }
+
+    let persistence = match persistence::sqlite::init_db() {
+        Ok(conn) => {
+            if let Ok(path) = persistence::sqlite::db_path() {
+                info!("persistence: {}", path.display());
+            } else {
+                info!("persistence: enabled");
+            }
+            Some(conn)
+        }
+        Err(e) => {
+            warn!("persistence init failed: {}, slots in-memory only", e);
+            None
+        }
+    };
 
     let (tx, rx) = mpsc::channel();
     let mode = Arc::new(AtomicU8::new(0));
@@ -68,7 +85,7 @@ fn run_macos() -> Result<(), String> {
 
     let state_tx = tx.clone();
     let mode_state = mode.clone();
-    let state_handle = thread::spawn(move || run(rx, state_tx, mode_state));
+    let state_handle = thread::spawn(move || run(rx, state_tx, mode_state, persistence));
 
     macos::event_tap::run_event_tap_with_sender(tx, mode)?;
 

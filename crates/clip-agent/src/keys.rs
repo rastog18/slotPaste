@@ -22,7 +22,7 @@ pub enum SlotId {
 }
 
 impl SlotId {
-    /// Human-readable label for logs.
+    /// Human-readable label for logs and DB key.
     pub fn label(self) -> &'static str {
         match self {
             SlotId::J => "J",
@@ -31,6 +31,19 @@ impl SlotId {
             SlotId::U => "U",
             SlotId::I => "I",
             SlotId::O => "O",
+        }
+    }
+
+    /// Parse slot key from DB (e.g. "J" -> SlotId::J).
+    pub fn from_label(s: &str) -> Option<SlotId> {
+        match s {
+            "J" => Some(SlotId::J),
+            "K" => Some(SlotId::K),
+            "L" => Some(SlotId::L),
+            "U" => Some(SlotId::U),
+            "I" => Some(SlotId::I),
+            "O" => Some(SlotId::O),
+            _ => None,
         }
     }
 }
