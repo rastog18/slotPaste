@@ -41,9 +41,8 @@ impl SlotStorage {
         }
     }
 
-    pub fn save(&mut self, slot: SlotId, _content: String) {
-        // Placeholder: no clipboard yet. Store non-empty so paste shows "Pasted" not "empty"
-        self.slots.insert(slot, " ".to_string());
+    pub fn save(&mut self, slot: SlotId, content: String) {
+        self.slots.insert(slot, content);
     }
 
     pub fn get(&self, slot: SlotId) -> Option<&str> {
@@ -159,8 +158,7 @@ fn handle_copy_armed(
                     debug!("Cmd released, now CopySelecting");
                     match key {
                         Key::Slot(slot) => {
-                            info!("Saved → Slot {}", slot.label());
-                            slots.save(slot, " ".to_string()); // placeholder; no clipboard yet
+                            save_slot_from_clipboard(slots, slot);
                             State::Idle
                         }
                         Key::Escape => {
@@ -225,8 +223,7 @@ fn handle_copy_selecting(
         }
         Event::KeyDown(Key::Slot(slot), _) => {
             if Instant::now() < deadline {
-                info!("Saved → Slot {}", slot.label());
-                slots.save(slot, " ".to_string()); // placeholder; no clipboard yet
+                save_slot_from_clipboard(slots, slot);
             } else {
                 info!("Copy select cancelled (timeout)");
             }
@@ -276,6 +273,39 @@ fn handle_paste_selecting(
             State::Idle
         }
         _ => State::PasteSelecting { deadline, token },
+    }
+}
+
+/// Reads clipboard and saves to slot. Logs result. Does not overwrite slot if no text.
+fn save_slot_from_clipboard(slots: &mut SlotStorage, slot: SlotId) {
+    #[cfg(target_os = "macos")]
+    {
+        let text = crate::macos::clipboard::read_text_with_retry(Duration::from_millis(300));
+        match text {
+            Some(content) => {
+                let preview = preview_for_log(&content);
+                info!("Saved → Slot {}: \"{}\"", slot.label(), preview);
+                slots.save(slot, content);
+            }
+            None => {
+                info!("Nothing to save (clipboard has no text)");
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        info!("Clipboard read not supported on this platform");
+    }
+}
+
+/// Safe preview for logging: trim, replace newlines, cap at 30 chars.
+fn preview_for_log(s: &str) -> String {
+    let trimmed: String = s.trim().replace('\n', " ").replace('\r', " ");
+    let chars: Vec<_> = trimmed.chars().collect();
+    if chars.len() <= 30 {
+        trimmed
+    } else {
+        chars.iter().take(30).collect::<String>() + "..."
     }
 }
 

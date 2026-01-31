@@ -27,9 +27,11 @@ RUST_LOG=debug cargo run -p clip-agent
 **Note:** Keyboard capture requires Accessibility permission. Run `cargo run -p clip -- doctor` first to verify or grant permission.
 
 **Milestone 3 (Slot Select mode):** 0.8s window after Cmd+C or Cmd+V:
-- Cmd+C → release Cmd → press J/K/L/U/I/O → `Saved → Slot J`
+- Cmd+C → release Cmd → press J/K/L/U/I/O → `Saved → Slot J` (with clipboard preview)
 - Cmd+V → press J/K/L/U/I/O → `Pasted ← Slot J` or `Slot J is empty`
 - Esc / timeout / invalid key → cancel logs
+
+**Milestone 4 (Clipboard read):** On save, reads actual clipboard text with ~300ms retry; logs preview.
 
 ### Doctor (system checks)
 
@@ -75,14 +77,12 @@ The workspace contains:
 - `crates/clip-agent` - Background agent/daemon
 - `apps/clip-ui` - Tauri UI (placeholder, to be implemented)
 
-## Milestone 3 Verification Checklist
+## Milestone 4 Verification Checklist
 
 ```bash
-RUST_LOG=debug cargo run -p clip-agent
+RUST_LOG=info cargo run -p clip-agent
 ```
 
-- [ ] **Copy + slot:** Cmd+C, release Cmd, press J within 0.8s → logs `Saved → Slot J`
-- [ ] **Copy timeout:** Cmd+C, wait >0.8s → logs `Copy select cancelled (timeout)`
-- [ ] **Copy esc:** Cmd+C, press Esc → logs `Copy select cancelled (esc)`
-- [ ] **Paste + slot:** Cmd+V, press J within 0.8s → logs `Pasted ← Slot J` or `Slot J is empty`
-- [ ] **Invalid key:** During select window, press non-slot key → logs `... cancelled (invalid key: ...)`
+- [ ] **Copy + slot with text:** Copy text in any app (Cmd+C), release Cmd, hit J quickly → logs `Saved → Slot J: "..."` with actual copied preview
+- [ ] **Copy non-text:** Copy image or other non-text content, then Cmd+C → J → logs `Nothing to save (clipboard has no text)`
+- [ ] **Paste flow unchanged:** Cmd+V then J → logs `Pasted ← Slot J` if slot has text, or `Slot J is empty` otherwise
