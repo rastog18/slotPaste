@@ -1,3 +1,5 @@
+mod doctor;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::process::Command;
@@ -5,7 +7,7 @@ use tracing::{error, info};
 
 #[derive(Parser)]
 #[command(name = "clip")]
-#[command(about = "Clip - macOS clipboard manager")]
+#[command(about = "Slotpaste - macOS clipboard manager")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -30,10 +32,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Start => start_agent()?,
-        Commands::Doctor => {
-            println!("not implemented yet");
-            std::process::exit(0);
-        }
+        Commands::Doctor => doctor::run_accessibility_check(),
         Commands::Install => {
             println!("not implemented yet");
             std::process::exit(0);

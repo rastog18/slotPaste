@@ -1,5 +1,11 @@
+#[cfg(not(target_os = "macos"))]
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::info;
+#[cfg(not(target_os = "macos"))]
+use tracing::warn;
+
+mod keys;
+mod state_machine;
 
 fn main() {
     tracing_subscriber::fmt()
@@ -8,14 +14,63 @@ fn main() {
 
     info!("agent running");
 
-    ctrlc::set_handler(move || {
-        warn!("agent stopping");
-        std::process::exit(0);
-    })
-    .expect("Error setting Ctrl+C handler");
+    #[cfg(target_os = "macos")]
+    {
+        if let Err(e) = run_macos() {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
+    }
 
-    loop {
-        std::thread::sleep(Duration::from_secs(5));
-        info!("agent running");
+    #[cfg(not(target_os = "macos"))]
+    {
+        info!("Keyboard capture only supported on macOS");
+        ctrlc::set_handler(move || {
+            warn!("agent stopping");
+            std::process::exit(0);
+        })
+        .expect("Error setting Ctrl+C handler");
+
+        loop {
+            std::thread::sleep(Duration::from_secs(5));
+            info!("agent running");
+        }
     }
 }
+
+#[cfg(target_os = "macos")]
+fn run_macos() -> Result<(), String> {
+    use crate::state_machine::{run, Event};
+    use std::sync::mpsc;
+    use std::thread;
+
+    if !macos::event_tap::has_accessibility_permission() {
+        return Err(
+            "Accessibility permission not granted. Run `clip doctor` to open System Settings."
+                .to_string(),
+        );
+    }
+
+    let (tx, rx) = mpsc::channel();
+
+    ctrlc::set_handler({
+        let tx = tx.clone();
+        move || {
+            tracing::warn!("agent stopping");
+            let _ = tx.send(Event::Quit);
+            core_foundation::runloop::CFRunLoop::get_main().stop();
+        }
+    })
+    .map_err(|e| format!("Failed to set Ctrl+C handler: {}", e))?;
+
+    let state_tx = tx.clone();
+    let state_handle = thread::spawn(move || run(rx, state_tx));
+
+    macos::event_tap::run_event_tap_with_sender(tx)?;
+
+    let _ = state_handle.join();
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+mod macos;
