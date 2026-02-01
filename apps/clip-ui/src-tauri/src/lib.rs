@@ -7,6 +7,9 @@ use std::thread;
 use std::time::Duration;
 use tauri::Emitter;
 use tauri::Manager;
+use tauri::WebviewUrl;
+use tauri::WebviewWindow;
+use tauri::WebviewWindowBuilder;
 
 const UI_PORT: u16 = 45454;
 const AGENT_PORT: u16 = 45455;
@@ -58,6 +61,35 @@ fn log_monitors(handle: &tauri::AppHandle) {
     eprintln!("[clip-ui] --- end monitor diagnostics ---");
 }
 
+fn ensure_chooser_window(handle: &tauri::AppHandle) -> Option<WebviewWindow> {
+    if let Some(win) = handle.get_webview_window("chooser") {
+        return Some(win);
+    }
+
+    eprintln!("[clip-ui] chooser window missing; creating fallback window");
+    let builder = WebviewWindowBuilder::new(handle, "chooser", WebviewUrl::App("index.html".into()))
+        .title("Slotpaste")
+        .inner_size(600.0, 250.0)
+        .resizable(false)
+        .decorations(false)
+        .transparent(false)
+        .always_on_top(true)
+        .visible_on_all_workspaces(true)
+        .focusable(true)
+        .visible(true);
+
+    match builder.build() {
+        Ok(win) => {
+            eprintln!("[clip-ui] chooser fallback window created");
+            Some(win)
+        }
+        Err(err) => {
+            eprintln!("[clip-ui] ERROR: failed to create chooser fallback window: {err}");
+            None
+        }
+    }
+}
+
 fn show_chooser_on_main_thread(
     handle: tauri::AppHandle,
     mode: String,
@@ -70,10 +102,6 @@ fn show_chooser_on_main_thread(
         eprintln!("[clip-ui] show_chooser_on_main_thread: main thread closure entered");
         log_windows(&h);
 
-        if h.get_webview_window("main").is_none() {
-            eprintln!("[clip-ui] ERROR: window 'main' not found");
-        }
-
         if let Ok(mut t) = current_token().lock() {
             *t = Some(token.clone());
         }
@@ -83,9 +111,9 @@ fn show_chooser_on_main_thread(
             "timeout_ms": timeout_ms
         }));
 
-        let chooser = h.get_webview_window("chooser");
+        let chooser = ensure_chooser_window(&h);
         if chooser.is_none() {
-            eprintln!("[clip-ui] ERROR: window 'chooser' not found");
+            eprintln!("[clip-ui] ERROR: window 'chooser' not available");
             return;
         }
         eprintln!("[clip-ui] UDP show: got chooser window, applying show sequence");
@@ -147,8 +175,8 @@ pub fn run() {
         .setup(|app| {
             #[cfg(target_os = "macos")]
             {
-                app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-                eprintln!("[clip-ui] activation policy set to Accessory");
+                app.set_activation_policy(tauri::ActivationPolicy::Regular);
+                eprintln!("[clip-ui] activation policy set to Regular (debug visibility)");
             }
 
             let handle = app.handle().clone();
@@ -163,9 +191,9 @@ pub fn run() {
                         eprintln!("[clip-ui] startup test: begin");
                         log_monitors(&h);
                         log_windows(&h);
-                        let chooser = h.get_webview_window("chooser");
+                        let chooser = ensure_chooser_window(&h);
                         if chooser.is_none() {
-                            eprintln!("[clip-ui] ERROR: startup test - window 'chooser' not found");
+                            eprintln!("[clip-ui] ERROR: startup test - window 'chooser' not available");
                             return;
                         }
                         eprintln!("[clip-ui] startup test: got chooser, applying show sequence (no center)");
