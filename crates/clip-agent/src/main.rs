@@ -4,6 +4,7 @@ use tracing::info;
 #[cfg(not(target_os = "macos"))]
 use tracing::warn;
 
+mod ipc;
 mod keys;
 mod persistence;
 mod state_machine;
@@ -41,6 +42,7 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn run_macos() -> Result<(), String> {
+    use crate::ipc::udp;
     use crate::state_machine::{run, Event};
     use std::sync::atomic::AtomicU8;
     use std::sync::mpsc;
@@ -73,6 +75,8 @@ fn run_macos() -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
     let mode = Arc::new(AtomicU8::new(0));
 
+    udp::start_response_listener(tx.clone());
+
     ctrlc::set_handler({
         let tx = tx.clone();
         move || {
@@ -87,7 +91,7 @@ fn run_macos() -> Result<(), String> {
     let mode_state = mode.clone();
     let state_handle = thread::spawn(move || run(rx, state_tx, mode_state, persistence));
 
-    macos::event_tap::run_event_tap_with_sender(tx, mode)?;
+    macos::event_tap::run_event_tap_with_sender(tx)?;
 
     let _ = state_handle.join();
     Ok(())

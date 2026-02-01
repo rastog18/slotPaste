@@ -1,4 +1,4 @@
-//! Slot Select mode state machine.
+//! Slotpaste state machine: chooser overlay (save after Cmd+C, paste after Cmd+Option+V).
 
 use crate::keys::{Key, SlotId};
 use std::collections::HashMap;
@@ -7,38 +7,39 @@ use std::sync::{atomic::AtomicU8, mpsc::Receiver, mpsc::Sender, Arc};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-/// Mode for event tap: 0=Idle, 1=CopyArmed, 2=CopySelecting, 3=PasteSelecting.
+/// Mode for event tap: 0=Idle, 1=SaveChooserPending, 2=PasteChooserActive.
 pub const MODE_IDLE: u8 = 0;
-pub const MODE_COPY_ARMED: u8 = 1;
-pub const MODE_COPY_SELECTING: u8 = 2;
-pub const MODE_PASTE_SELECTING: u8 = 3;
+pub const MODE_SAVE_PENDING: u8 = 1;
+pub const MODE_PASTE_ACTIVE: u8 = 2;
 
-/// Internal events from event tap or timer.
+/// Internal events from event tap, IPC, or timer.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum Event {
     KeyDown(Key, u64),
     KeyUp(Key, u64),
     FlagsChanged(u64),
-    /// Sent by event tap when Cmd+V was swallowed in Idle (paste trigger).
-    CmdVTrigger,
-    Timeout(u64),
+    /// Cmd+Option+V swallowed in Idle -> show paste chooser.
+    CmdOptionVTrigger,
+    /// UI chose slot 1..6.
+    ChooserChosen { token: String, slot_num: u8 },
+    /// UI cancel or timeout.
+    ChooserCancel { token: String, reason: String },
     Quit,
 }
 
-const SLOT_SELECT_WINDOW: Duration = Duration::from_millis(800);
+const CHOOSER_TIMEOUT_MS: u64 = 800;
 const CMD_MASK: u64 = 1 << 20;
 
 /// State machine state.
 #[derive(Debug)]
 enum State {
     Idle,
-    CopyArmed { deadline: Instant, token: u64 },
-    CopySelecting { deadline: Instant, token: u64 },
-    PasteSelecting { deadline: Instant, token: u64 },
+    SaveChooserPending { token: String, deadline: Instant },
+    PasteChooserActive { token: String, deadline: Instant },
 }
 
-/// In-memory slot storage; optionally backed by SQLite (upsert on save, load on start).
+/// In-memory slot storage; optionally backed by SQLite.
 pub struct SlotStorage {
     slots: HashMap<SlotId, String>,
     persistence: Option<rusqlite::Connection>,
@@ -46,18 +47,11 @@ pub struct SlotStorage {
 
 impl SlotStorage {
     pub fn new() -> Self {
-        Self {
-            slots: HashMap::new(),
-            persistence: None,
-        }
+        Self { slots: HashMap::new(), persistence: None }
     }
 
-    /// Pre-populate from DB and use connection for future upserts.
     pub fn with_persistence(conn: rusqlite::Connection, loaded: HashMap<SlotId, String>) -> Self {
-        Self {
-            slots: loaded,
-            persistence: Some(conn),
-        }
+        Self { slots: loaded, persistence: Some(conn) }
     }
 
     pub fn save(&mut self, slot: SlotId, content: String) {
@@ -85,8 +79,6 @@ impl Default for SlotStorage {
 }
 
 /// Runs the state machine loop. Returns when Quit is received.
-/// Updates `mode` (0=Idle, 1=CopyArmed, 2=CopySelecting, 3=PasteSelecting) on every transition.
-/// If `persistence` is Some(conn), loads slots from DB and upserts on save.
 pub fn run(
     rx: Receiver<Event>,
     tx: Sender<Event>,
@@ -100,7 +92,7 @@ pub fn run(
                     let loaded: HashMap<SlotId, String> = rows
                         .into_iter()
                         .filter_map(|(k, v)| SlotId::from_label(&k).map(|s| (s, v)))
-                    .collect();
+                        .collect();
                     info!("loaded {} slots from DB", loaded.len());
                     SlotStorage::with_persistence(conn, loaded)
                 }
@@ -123,7 +115,6 @@ pub fn run(
             Err(_) => break,
         };
 
-        let prev_cmd_down = cmd_down;
         match &event {
             Event::Quit => {
                 debug!("Received Quit");
@@ -137,15 +128,12 @@ pub fn run(
         }
 
         state = match state {
-            State::Idle => handle_idle(state, event, &mut next_token, cmd_down, &tx),
-            State::CopyArmed { deadline, token } => {
-                handle_copy_armed(event, deadline, token, &mut next_token, prev_cmd_down, &tx, &mut slots)
+            State::Idle => handle_idle(event, &mut next_token, &tx),
+            State::SaveChooserPending { token, deadline } => {
+                handle_save_chooser_pending(event, token.clone(), deadline, &tx, &mut slots)
             }
-            State::CopySelecting { deadline, token } => {
-                handle_copy_selecting(event, deadline, token, &mut slots)
-            }
-            State::PasteSelecting { deadline, token } => {
-                handle_paste_selecting(event, deadline, token, &slots)
+            State::PasteChooserActive { token, deadline } => {
+                handle_paste_chooser_active(event, token.clone(), deadline, &tx, &slots)
             }
         };
         set_mode_for_state(&state, &mode);
@@ -155,199 +143,90 @@ pub fn run(
 fn set_mode_for_state(state: &State, mode: &AtomicU8) {
     let m = match state {
         State::Idle => MODE_IDLE,
-        State::CopyArmed { .. } => MODE_COPY_ARMED,
-        State::CopySelecting { .. } => MODE_COPY_SELECTING,
-        State::PasteSelecting { .. } => MODE_PASTE_SELECTING,
+        State::SaveChooserPending { .. } => MODE_SAVE_PENDING,
+        State::PasteChooserActive { .. } => MODE_PASTE_ACTIVE,
     };
     mode.store(m, Ordering::Release);
 }
 
-fn handle_idle(
-    _state: State,
-    event: Event,
-    next_token: &mut u64,
-    _cmd_down: bool,
-    tx: &Sender<Event>,
-) -> State {
+fn handle_idle(event: Event, next_token: &mut u64, tx: &Sender<Event>) -> State {
     match event {
         Event::KeyDown(Key::C, flags) if (flags & CMD_MASK) != 0 => {
             *next_token += 1;
-            let token = *next_token;
-            let deadline = Instant::now() + SLOT_SELECT_WINDOW;
-            spawn_timeout(deadline, token, tx.clone());
-            debug!("CopyArmed deadline={:?} token={}", deadline, token);
-            State::CopyArmed { deadline, token }
+            let token = next_token.to_string();
+            let deadline = Instant::now() + Duration::from_millis(CHOOSER_TIMEOUT_MS);
+            crate::ipc::udp::send_show("save", &token, CHOOSER_TIMEOUT_MS);
+            spawn_chooser_timeout(token.clone(), tx.clone());
+            info!("Chooser show (save) token={} -> UI", token);
+            State::SaveChooserPending { token, deadline }
         }
-        Event::CmdVTrigger => {
+        Event::CmdOptionVTrigger => {
             *next_token += 1;
-            let token = *next_token;
-            let deadline = Instant::now() + SLOT_SELECT_WINDOW;
-            spawn_timeout(deadline, token, tx.clone());
-            debug!("PasteSelecting deadline={:?} token={}", deadline, token);
-            State::PasteSelecting { deadline, token }
-        }
-        Event::KeyDown(Key::V, flags) if (flags & CMD_MASK) != 0 => {
-            *next_token += 1;
-            let token = *next_token;
-            let deadline = Instant::now() + SLOT_SELECT_WINDOW;
-            spawn_timeout(deadline, token, tx.clone());
-            debug!("PasteSelecting deadline={:?} token={}", deadline, token);
-            State::PasteSelecting { deadline, token }
+            let token = next_token.to_string();
+            let deadline = Instant::now() + Duration::from_millis(CHOOSER_TIMEOUT_MS);
+            crate::ipc::udp::send_show("paste", &token, CHOOSER_TIMEOUT_MS);
+            spawn_chooser_timeout(token.clone(), tx.clone());
+            info!("Chooser show (paste) token={} -> UI", token);
+            State::PasteChooserActive { token, deadline }
         }
         _ => State::Idle,
     }
 }
 
-fn handle_copy_armed(
+fn handle_save_chooser_pending(
     event: Event,
+    token: String,
     deadline: Instant,
-    token: u64,
-    _next_token: &mut u64,
-    cmd_down: bool,
-    _tx: &Sender<Event>,
+    tx: &Sender<Event>,
     slots: &mut SlotStorage,
 ) -> State {
     match event {
-        Event::Timeout(t) if t == token => {
-            info!("Copy select cancelled (timeout)");
-            State::Idle
-        }
-        Event::KeyDown(Key::Escape, _) => {
-            info!("Copy select cancelled (esc)");
-            State::Idle
-        }
-        Event::KeyDown(key, _) => {
-            if !cmd_down {
-                // Cmd released: transition to CopySelecting
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    info!("Copy select cancelled (timeout)");
-                    State::Idle
-                } else {
-                    debug!("Cmd released, now CopySelecting");
-                    match key {
-                        Key::Slot(slot) => {
-                            save_slot_from_clipboard(slots, slot);
-                            State::Idle
-                        }
-                        Key::Escape => {
-                            info!("Copy select cancelled (esc)");
-                            State::Idle
-                        }
-                        Key::Other(_) | Key::C | Key::V => {
-                            info!("Copy select cancelled (invalid key: {})", key_debug(key));
-                            State::Idle
-                        }
-                    }
-                }
-            } else {
-                // Cmd still down: ignore slot keys (must wait for release)
-                if matches!(key, Key::Slot(_)) {
-                    debug!("Ignoring slot key while Cmd held");
-                } else if matches!(key, Key::Escape) {
-                    info!("Copy select cancelled (esc)");
-                    return State::Idle;
-                } else if !matches!(key, Key::C | Key::V) {
-                    info!("Copy select cancelled (invalid key: {})", key_debug(key));
-                    return State::Idle;
-                }
-                State::CopyArmed { deadline, token }
-            }
-        }
-        Event::FlagsChanged(flags) => {
-            let cmd_now = (flags & CMD_MASK) != 0;
-            if !cmd_now && cmd_down {
-                // cmd_down = was true before this event, cmd_now = false now => Cmd just released
-                // Cmd just released: transition to CopySelecting
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    info!("Copy select cancelled (timeout)");
-                    State::Idle
-                } else {
-                    debug!("Cmd released (via FlagsChanged), now CopySelecting");
-                    State::CopySelecting { deadline, token }
-                }
-            } else {
-                State::CopyArmed { deadline, token }
-            }
-        }
-        _ => State::CopyArmed { deadline, token },
-    }
-}
-
-fn handle_copy_selecting(
-    event: Event,
-    deadline: Instant,
-    token: u64,
-    slots: &mut SlotStorage,
-) -> State {
-    match event {
-        Event::Timeout(t) if t == token => {
-            info!("Copy select cancelled (timeout)");
-            State::Idle
-        }
-        Event::KeyDown(Key::Escape, _) => {
-            info!("Copy select cancelled (esc)");
-            State::Idle
-        }
-        Event::KeyDown(Key::Slot(slot), _) => {
-            if Instant::now() < deadline {
+        Event::ChooserChosen { token: t, slot_num } if t == token => {
+            if let Some(slot) = SlotId::from_slot_num(slot_num) {
                 save_slot_from_clipboard(slots, slot);
-            } else {
-                info!("Copy select cancelled (timeout)");
             }
+            crate::ipc::udp::send_hide(&token);
             State::Idle
         }
-        Event::KeyDown(key, _) => {
-            if Instant::now() < deadline {
-                info!("Copy select cancelled (invalid key: {})", key_debug(key));
-            }
+        Event::ChooserCancel { token: t, reason } if t == token => {
+            info!("Save chooser cancelled: {}", reason);
+            crate::ipc::udp::send_hide(&token);
             State::Idle
         }
-        _ => State::CopySelecting { deadline, token },
+        _ => State::SaveChooserPending { token, deadline },
     }
 }
 
-fn handle_paste_selecting(
+fn handle_paste_chooser_active(
     event: Event,
+    token: String,
     deadline: Instant,
-    token: u64,
+    tx: &Sender<Event>,
     slots: &SlotStorage,
 ) -> State {
     match event {
-        Event::Timeout(t) if t == token => {
-            info!("Paste select cancelled (timeout)");
-            State::Idle
-        }
-        Event::KeyDown(Key::Escape, _) => {
-            info!("Paste select cancelled (esc)");
-            State::Idle
-        }
-        Event::KeyDown(Key::Slot(slot), _) => {
-            if Instant::now() < deadline {
+        Event::ChooserChosen { token: t, slot_num } if t == token => {
+            if let Some(slot) = SlotId::from_slot_num(slot_num) {
                 if slots.is_empty(slot) {
                     info!("Slot {} is empty", slot.label());
                 } else if let Some(content) = slots.get(slot).map(|s| s.to_string()) {
                     info!("Pasted ← Slot {}", slot.label());
                     #[cfg(target_os = "macos")]
-                    crate::macos::paste::paste_from_slot(&content);
+                    std::thread::spawn(move || crate::macos::paste::paste_from_slot(&content));
                 }
-            } else {
-                info!("Paste select cancelled (timeout)");
             }
+            crate::ipc::udp::send_hide(&token);
             State::Idle
         }
-        Event::KeyDown(key, _) => {
-            if Instant::now() < deadline {
-                info!("Paste select cancelled (invalid key: {})", key_debug(key));
-            }
+        Event::ChooserCancel { token: t, reason } if t == token => {
+            info!("Paste chooser cancelled: {}", reason);
+            crate::ipc::udp::send_hide(&token);
             State::Idle
         }
-        _ => State::PasteSelecting { deadline, token },
+        _ => State::PasteChooserActive { token, deadline },
     }
 }
 
-/// Reads clipboard and saves to slot. Logs result. Does not overwrite slot if no text.
 fn save_slot_from_clipboard(slots: &mut SlotStorage, slot: SlotId) {
     #[cfg(target_os = "macos")]
     {
@@ -358,9 +237,7 @@ fn save_slot_from_clipboard(slots: &mut SlotStorage, slot: SlotId) {
                 info!("Saved → Slot {}: \"{}\"", slot.label(), preview);
                 slots.save(slot, content);
             }
-            None => {
-                info!("Nothing to save (clipboard has no text)");
-            }
+            None => info!("Nothing to save (clipboard has no text)"),
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -369,7 +246,6 @@ fn save_slot_from_clipboard(slots: &mut SlotStorage, slot: SlotId) {
     }
 }
 
-/// Safe preview for logging: trim, replace newlines, cap at 30 chars.
 fn preview_for_log(s: &str) -> String {
     let trimmed: String = s.trim().replace('\n', " ").replace('\r', " ");
     let chars: Vec<_> = trimmed.chars().collect();
@@ -380,22 +256,9 @@ fn preview_for_log(s: &str) -> String {
     }
 }
 
-fn key_debug(key: Key) -> String {
-    match key {
-        Key::Slot(s) => format!("slot {}", s.label()),
-        Key::Escape => "Esc".to_string(),
-        Key::C => "C".to_string(),
-        Key::V => "V".to_string(),
-        Key::Other(c) => format!("keycode {}", c),
-    }
-}
-
-fn spawn_timeout(deadline: Instant, token: u64, tx: Sender<Event>) {
+fn spawn_chooser_timeout(token: String, tx: Sender<Event>) {
     std::thread::spawn(move || {
-        let now = Instant::now();
-        if deadline > now {
-            std::thread::sleep(deadline - now);
-        }
-        let _ = tx.send(Event::Timeout(token));
+        std::thread::sleep(Duration::from_millis(CHOOSER_TIMEOUT_MS));
+        let _ = tx.send(Event::ChooserCancel { token, reason: "timeout".to_string() });
     });
 }

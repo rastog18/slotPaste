@@ -2,6 +2,7 @@
 members = [
     "crates/clip",
     "crates/clip-agent",
+    "apps/clip-ui/src-tauri",
 ]
 resolver = "2"
 

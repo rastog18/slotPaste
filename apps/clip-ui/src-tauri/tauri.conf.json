@@ -1,0 +1,29 @@
+{
+  "productName": "clip-ui",
+  "version": "0.1.0",
+  "identifier": "app.slotpaste.clip-ui",
+  "build": {
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "frontendDist": ".."
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "chooser",
+        "title": "Slotpaste",
+        "width": 280,
+        "height": 120,
+        "resizable": false,
+        "decorations": false,
+        "transparent": false,
+        "alwaysOnTop": true,
+        "visible": false,
+        "center": true
+      }
+    ]
+  },
+  "bundle": {},
+  "plugins": {}
+}

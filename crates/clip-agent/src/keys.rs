@@ -46,6 +46,19 @@ impl SlotId {
             _ => None,
         }
     }
+
+    /// Chooser slot number 1..6 -> SlotId. 1=J, 2=K, 3=L, 4=U, 5=I, 6=O.
+    pub fn from_slot_num(n: u8) -> Option<SlotId> {
+        match n {
+            1 => Some(SlotId::J),
+            2 => Some(SlotId::K),
+            3 => Some(SlotId::L),
+            4 => Some(SlotId::U),
+            5 => Some(SlotId::I),
+            6 => Some(SlotId::O),
+            _ => None,
+        }
+    }
 }
 
 /// macOS virtual key codes (Carbon-style).
