@@ -105,6 +105,7 @@ pub fn run(
         None => SlotStorage::new(),
     };
     let mut state = State::Idle;
+    #[allow(unused_assignments)]
     let mut cmd_down = false;
     let mut next_token: u64 = 0;
     mode.store(MODE_IDLE, Ordering::Release);
@@ -152,21 +153,25 @@ fn set_mode_for_state(state: &State, mode: &AtomicU8) {
 fn handle_idle(event: Event, next_token: &mut u64, tx: &Sender<Event>) -> State {
     match event {
         Event::KeyDown(Key::C, flags) if (flags & CMD_MASK) != 0 => {
+            info!("Cmd+C detected (KeyDown C with Cmd) -> save chooser flow");
             *next_token += 1;
             let token = next_token.to_string();
             let deadline = Instant::now() + Duration::from_millis(CHOOSER_TIMEOUT_MS);
+            info!("send_show(save, token={}) -> UDP 45454", token);
             crate::ipc::udp::send_show("save", &token, CHOOSER_TIMEOUT_MS);
             spawn_chooser_timeout(token.clone(), tx.clone());
-            info!("Chooser show (save) token={} -> UI", token);
+            info!("Chooser show (save) token={} -> UI, state=SaveChooserPending", token);
             State::SaveChooserPending { token, deadline }
         }
         Event::CmdOptionVTrigger => {
+            info!("Cmd+Option+V detected -> paste chooser flow");
             *next_token += 1;
             let token = next_token.to_string();
             let deadline = Instant::now() + Duration::from_millis(CHOOSER_TIMEOUT_MS);
+            info!("send_show(paste, token={}) -> UDP 45454", token);
             crate::ipc::udp::send_show("paste", &token, CHOOSER_TIMEOUT_MS);
             spawn_chooser_timeout(token.clone(), tx.clone());
-            info!("Chooser show (paste) token={} -> UI", token);
+            info!("Chooser show (paste) token={} -> UI, state=PasteChooserActive", token);
             State::PasteChooserActive { token, deadline }
         }
         _ => State::Idle,
@@ -177,19 +182,22 @@ fn handle_save_chooser_pending(
     event: Event,
     token: String,
     deadline: Instant,
-    tx: &Sender<Event>,
+    _tx: &Sender<Event>,
     slots: &mut SlotStorage,
 ) -> State {
     match event {
         Event::ChooserChosen { token: t, slot_num } if t == token => {
+            info!("Save chooser: user chose slot {} (token={})", slot_num, t);
             if let Some(slot) = SlotId::from_slot_num(slot_num) {
                 save_slot_from_clipboard(slots, slot);
             }
+            info!("send_hide(token={}) -> UI", token);
             crate::ipc::udp::send_hide(&token);
             State::Idle
         }
         Event::ChooserCancel { token: t, reason } if t == token => {
-            info!("Save chooser cancelled: {}", reason);
+            info!("Save chooser cancelled: {} (token={})", reason, t);
+            info!("send_hide(token={}) -> UI", token);
             crate::ipc::udp::send_hide(&token);
             State::Idle
         }
@@ -201,11 +209,12 @@ fn handle_paste_chooser_active(
     event: Event,
     token: String,
     deadline: Instant,
-    tx: &Sender<Event>,
+    _tx: &Sender<Event>,
     slots: &SlotStorage,
 ) -> State {
     match event {
         Event::ChooserChosen { token: t, slot_num } if t == token => {
+            info!("Paste chooser: user chose slot {} (token={})", slot_num, t);
             if let Some(slot) = SlotId::from_slot_num(slot_num) {
                 if slots.is_empty(slot) {
                     info!("Slot {} is empty", slot.label());
@@ -215,11 +224,13 @@ fn handle_paste_chooser_active(
                     std::thread::spawn(move || crate::macos::paste::paste_from_slot(&content));
                 }
             }
+            info!("send_hide(token={}) -> UI", token);
             crate::ipc::udp::send_hide(&token);
             State::Idle
         }
         Event::ChooserCancel { token: t, reason } if t == token => {
-            info!("Paste chooser cancelled: {}", reason);
+            info!("Paste chooser cancelled: {} (token={})", reason, t);
+            info!("send_hide(token={}) -> UI", token);
             crate::ipc::udp::send_hide(&token);
             State::Idle
         }
@@ -259,6 +270,7 @@ fn preview_for_log(s: &str) -> String {
 fn spawn_chooser_timeout(token: String, tx: Sender<Event>) {
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(CHOOSER_TIMEOUT_MS));
+        info!("chooser timeout fired (token={}), sending ChooserCancel", token);
         let _ = tx.send(Event::ChooserCancel { token, reason: "timeout".to_string() });
     });
 }

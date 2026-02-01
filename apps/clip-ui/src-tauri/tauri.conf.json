@@ -13,14 +13,14 @@
       {
         "label": "chooser",
         "title": "Slotpaste",
-        "width": 280,
-        "height": 120,
+        "width": 360,
+        "height": 140,
         "resizable": false,
         "decorations": false,
         "transparent": false,
         "alwaysOnTop": true,
-        "visible": false,
-        "center": true
+        "visibleOnAllWorkspaces": true,
+        "visible": false
       }
     ]
   },

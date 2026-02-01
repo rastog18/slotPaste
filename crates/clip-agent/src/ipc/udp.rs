@@ -4,7 +4,7 @@ use crate::state_machine::Event;
 use std::net::UdpSocket;
 use std::sync::mpsc::Sender;
 use std::thread;
-use tracing::{debug, error, warn};
+use tracing::{error, info, warn};
 
 const UI_PORT: u16 = 45454;
 const AGENT_PORT: u16 = 45455;
@@ -16,10 +16,14 @@ pub fn send_show(mode: &str, token: &str, timeout_ms: u64) {
         r#"{{"type":"show","mode":"{}","token":"{}","timeout_ms":{},"anchor":"mouse"}}"#,
         mode, token, timeout_ms
     );
+    info!("ipc: send_show -> {}:{} (mode={}, token={})", BIND_ADDR, UI_PORT, mode, token);
     if let Ok(sock) = UdpSocket::bind("127.0.0.1:0") {
-        if sock.send_to(msg.as_bytes(), (BIND_ADDR, UI_PORT)).is_err() {
-            debug!("ipc send_show failed (UI may not be running)");
+        match sock.send_to(msg.as_bytes(), (BIND_ADDR, UI_PORT)) {
+            Ok(n) => info!("ipc: send_show sent {} bytes", n),
+            Err(e) => info!("ipc: send_show failed: {} (UI may not be running)", e),
         }
+    } else {
+        info!("ipc: send_show failed to bind ephemeral socket");
     }
 }
 
@@ -73,11 +77,13 @@ fn parse_response(line: &str) -> Option<Event> {
         "chosen" => {
             let slot = v.get("slot")?.as_u64()? as u8;
             if (1..=6).contains(&slot) {
+                info!("ipc: received from UI -> ChooserChosen token={} slot={}", token, slot);
                 return Some(Event::ChooserChosen { token, slot_num: slot });
             }
         }
         "cancel" => {
             let reason = v.get("reason").and_then(|r| r.as_str()).unwrap_or("timeout").to_string();
+            info!("ipc: received from UI -> ChooserCancel token={} reason={}", token, reason);
             return Some(Event::ChooserCancel { token, reason });
         }
         _ => {}
